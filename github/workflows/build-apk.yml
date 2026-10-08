@@ -1,0 +1,83 @@
+name: Build RoyalVoice APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # پوشه‌ی پروژه‌ی گریدل را خودکار پیدا می‌کند (android/ یا ریشه‌ی ریپو)
+      - name: Locate Gradle project
+        id: loc
+        run: |
+          F=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path './.git/*' | head -n1)
+          if [ -z "$F" ]; then
+            echo "::error::settings.gradle(.kts) not found. Is the android folder committed?"
+            find . -maxdepth 3 -not -path './.git/*'
+            exit 1
+          fi
+          echo "dir=$(dirname "$F")" >> "$GITHUB_OUTPUT"
+          echo "Gradle project: $(dirname "$F")"
+
+      - name: Prepare Android SDK
+        continue-on-error: true
+        run: |
+          SDKM=$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager
+          yes | $SDKM --licenses > /dev/null || true
+          $SDKM 'platforms;android-34' 'build-tools;34.0.0' > /dev/null || true
+
+      - name: Install Gradle 8.7
+        run: |
+          curl -fsSL -o g.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          curl -fsSL -o g.sha https://services.gradle.org/distributions/gradle-8.7-bin.zip.sha256
+          echo "$(cut -d' ' -f1 g.sha)  g.zip" | sha256sum -c -
+          unzip -q g.zip -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-8.7/bin" >> "$GITHUB_PATH"
+
+      - name: Build signed APK
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Name the APK
+        run: cp "${{ steps.loc.outputs.dir }}/app/build/outputs/apk/release/app-release.apk" RoyalVoice.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RoyalVoice-apk
+          path: RoyalVoice.apk
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: RoyalVoice-apk
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_NUMBER: ${{ github.run_number }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release create "build-$RUN_NUMBER" RoyalVoice.apk \
+            --repo "$REPO" \
+            --target "$SHA" \
+            --title "RoyalVoice-build-$RUN_NUMBER" \
+            --generate-notes
